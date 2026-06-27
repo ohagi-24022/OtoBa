@@ -24,6 +24,13 @@
         #favorites-area { background: #5b78c7; padding: 8px; overflow-x: auto; white-space: nowrap; flex-shrink: 0; }
         .fav-btn { background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 12px; border-radius: 15px; font-size: 12px; margin-right: 5px; cursor: pointer; }
 
+        .status-panel { background: #ffffff; color: #222; padding: 10px 12px; border-bottom: 1px solid rgba(0,0,0,0.12); flex-shrink: 0; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+        .help-box { font-size: 12px; line-height: 1.5; margin-bottom: 8px; color: #334; }
+        .help-title { font-weight: bold; margin-bottom: 3px; color: #1f4f9a; }
+        .now-info { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 5px 8px; margin: 0; font-size: 13px; }
+        .now-info dt { font-weight: bold; color: #4165a8; }
+        .now-info dd { margin: 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
         /* スクロールエリア */
         #chat-area { 
             flex-grow: 1; 
@@ -67,6 +74,9 @@
             .video-section { height: 35vh; flex: none; }
             .chat-section { flex: 1; min-width: 0; border-left: none; }
             #player { position: absolute; top:0; left: 0; }
+            .status-panel { padding: 8px 10px; }
+            .help-box { font-size: 11px; }
+            .now-info { grid-template-columns: 82px minmax(0, 1fr); font-size: 12px; }
         }
     </style>
 </head>
@@ -84,6 +94,18 @@
         
         <div class="chat-section">
             <div id="favorites-area"></div>
+            <div class="status-panel">
+                <div class="help-box">
+                    <div class="help-title">ヘルプ</div>
+                    <div>曲名・YouTube URL: 予約 / #コメント: 弾幕 / skip: 次の予約へ / next・back: デフォルトBGM操作 / default 曲名・URL: デフォルトBGM変更</div>
+                </div>
+                <dl class="now-info">
+                    <dt>再生中</dt><dd id="current-track-name">-</dd>
+                    <dt>次の曲</dt><dd id="next-track-name">-</dd>
+                    <dt>待ち曲数</dt><dd id="queue-count">0</dd>
+                    <dt>デフォルト</dt><dd id="default-bgm-name">-</dd>
+                </dl>
+            </div>
             <div id="chat-area"></div>
             <div class="input-area">
                 <input type="text" id="message-input" placeholder="検索, #コメント, default..." autocomplete="off">
@@ -109,17 +131,42 @@
         let player;
         let queue = [];
         let isPlayingUserContent = false;
+        let currentTrackTitle = '-';
         
         // ★重要: デフォルトBGMの「今の再生位置」を記憶する変数
         let savedPlaylistIndex = 0;
 
         // 初期デフォルト値
-        let currentDefault = { id: "7Q3BGAPAGQY", type: "video" };
+        let currentDefault = { id: "7Q3BGAPAGQY", type: "video", title: "デフォルトBGM" };
+
+        function displayName(text, fallback = '-') {
+            return text && String(text).trim() ? String(text).trim() : fallback;
+        }
+
+        function updateStatusPanel() {
+            document.getElementById('current-track-name').innerText = displayName(currentTrackTitle);
+            document.getElementById('next-track-name').innerText = queue.length > 0 ? displayName(queue[0].title, 'リクエスト曲') : '-';
+            document.getElementById('queue-count').innerText = queue.length;
+            document.getElementById('default-bgm-name').innerText = displayName(currentDefault.title, currentDefault.type === 'playlist' ? 'Playlist' : 'Video');
+        }
+
+        function refreshTitleFromPlayer() {
+            if (!player || typeof player.getVideoData !== 'function') return;
+            const data = player.getVideoData();
+            if (!data || !data.title) return;
+            currentTrackTitle = data.title;
+            if (!isPlayingUserContent && (!currentDefault.title || ['Video', 'Playlist', 'デフォルトBGM'].includes(currentDefault.title))) {
+                currentDefault.title = data.title;
+            }
+            updateStatusPanel();
+        }
 
         // --- Socketイベント受信 ---
 
         socket.on('init-state', (data) => {
             if(data.defaultData) currentDefault = data.defaultData;
+            currentTrackTitle = currentDefault.title || 'デフォルトBGM';
+            updateStatusPanel();
         });
 
         socket.on('update-default', (data) => {
@@ -131,6 +178,8 @@
             }
 
             currentDefault = data;
+            if (!isPlayingUserContent) currentTrackTitle = currentDefault.title || 'デフォルトBGM';
+            updateStatusPanel();
 
             // リクエスト曲の再生中でなければ、即座に切り替え
             if (!isPlayingUserContent && player) {
@@ -179,12 +228,12 @@
                 return;
             }
 
-            if (videoId) queueVideo(videoId);
+            if (videoId) queueVideo(videoId, 'URLリクエスト');
         });
 
         socket.on('add-queue', (data) => {
             addSystemMessage(`🎵 ${data.source}: ${data.title}`);
-            queueVideo(data.videoId);
+            queueVideo(data.videoId, data.title);
         });
 
         socket.on('search-results', (items) => {
@@ -246,8 +295,9 @@
             addSystemMessage(`🔄 設定中...`);
         }
 
-        function queueVideo(videoId) {
-            queue.push(videoId);
+        function queueVideo(videoId, title = 'リクエスト曲') {
+            queue.push({ videoId, title });
+            updateStatusPanel();
             if (!isPlayingUserContent) playNext();
         }
 
@@ -283,6 +333,10 @@
                     // プレイリストはAPI側で自動進行
                 }
             }
+
+            if (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.CUED) {
+                refreshTitleFromPlayer();
+            }
         }
 
         function playNext() {
@@ -297,7 +351,10 @@
             if (queue.length > 0) {
                 isPlayingUserContent = true;
                 player.setLoop(false);
-                player.loadVideoById(queue.shift());
+                const nextTrack = queue.shift();
+                currentTrackTitle = nextTrack.title || 'リクエスト曲';
+                updateStatusPanel();
+                player.loadVideoById(nextTrack.videoId);
             } else {
                 playDefaultBGM();
             }
@@ -305,6 +362,8 @@
 
         function playDefaultBGM() {
             isPlayingUserContent = false;
+            currentTrackTitle = currentDefault.title || 'デフォルトBGM';
+            updateStatusPanel();
             
             if (currentDefault.type === 'playlist') {
                 console.log("プレイリスト復帰 位置:", savedPlaylistIndex);
@@ -322,6 +381,7 @@
                 });
                 player.setLoop(false);
             }
+            setTimeout(refreshTitleFromPlayer, 800);
         }
 
         // --- その他ヘルパー関数 ---
@@ -388,6 +448,7 @@
         document.getElementById('message-input').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendChat();
         });
+        updateStatusPanel();
     </script>
 </body>
 </html>
